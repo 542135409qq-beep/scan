@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>证件拍照助手</title>
+<style>
+  :root{
+    --ink:#14181c;          /* 主深色 */
+    --ink-2:#2a3138;
+    --paper:#f5f3ee;        /* 背景 */
+    --card:#ffffff;
+    --amber:#e8a317;        /* 取景框 / 强调（出租车暖色） */
+    --amber-d:#c8860a;
+    --line:#e2ddd2;
+    --muted:#7b7268;
+    --ok:#1f8a5b;
+    --danger:#c0392b;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--paper); color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  .wrap{max-width:520px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;}
+
+  /* 顶栏 */
+  header{
+    background:var(--ink); color:#fff;
+    padding:calc(14px + env(safe-area-inset-top)) 18px 14px;
+    display:flex;align-items:center;gap:10px;
+    position:sticky;top:0;z-index:20;
+  }
+  header .logo{
+    width:28px;height:28px;border-radius:7px;background:var(--amber);
+    display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+  }
+  header .logo svg{width:17px;height:17px;display:block;}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.5px;}
+  header .sub{font-size:11px;color:#b9b1a4;margin-top:1px;}
+
+  section{display:none;flex:1;}
+  section.active{display:flex;flex-direction:column;}
+
+  /* ====== 选择界面 ====== */
+  .intro{padding:20px 18px 6px;}
+  .intro p{margin:0 0 4px;font-size:14px;color:var(--muted);line-height:1.6;}
+  .grid{padding:12px 18px 24px;display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .tile{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:18px 14px;text-align:left;cursor:pointer;
+    display:flex;flex-direction:column;gap:10px;min-height:118px;
+    transition:transform .06s ease, box-shadow .12s ease;
+  }
+  .tile:active{transform:scale(.97);}
+  .tile .ic{width:38px;height:38px;border-radius:10px;background:#f3ede0;
+    display:flex;align-items:center;justify-content:center;color:var(--amber-d);}
+  .tile .ic svg{width:22px;height:22px;}
+  .tile b{font-size:15px;font-weight:600;}
+  .tile span{font-size:12px;color:var(--muted);line-height:1.4;}
+  .tips{margin:2px 18px 26px;background:#fbf8f1;border:1px solid var(--line);
+    border-radius:14px;padding:14px 16px;font-size:12.5px;color:var(--muted);line-height:1.7;}
+  .tips b{color:var(--ink);font-weight:600;}
+
+  /* ====== 相机界面 ====== */
+  .cam-stage{position:relative;background:#000;flex:1;min-height:60vh;overflow:hidden;}
+  video,#rawCanvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;}
+  #rawCanvas{display:none;}
+  .guide{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);
+    border-radius:12px;pointer-events:none;box-shadow:0 0 0 4000px rgba(0,0,0,.42);}
+  .guide::before,.guide::after,.guide i,.guide u{
+    content:"";position:absolute;width:26px;height:26px;border:3px solid var(--amber);}
+  .guide::before{left:-2px;top:-2px;border-right:0;border-bottom:0;border-top-left-radius:10px;}
+  .guide::after{right:-2px;top:-2px;border-left:0;border-bottom:0;border-top-right-radius:10px;}
+  .guide i{left:-2px;bottom:-2px;border-right:0;border-top:0;border-bottom-left-radius:10px;}
+  .guide u{right:-2px;bottom:-2px;border-left:0;border-top:0;border-bottom-right-radius:10px;}
+  .hint-band{position:absolute;left:0;right:0;top:calc(12px + env(safe-area-inset-top));
+    text-align:center;color:#fff;font-size:13px;pointer-events:none;z-index:5;
+    text-shadow:0 1px 4px rgba(0,0,0,.6);padding:0 20px;}
+  .cam-bar{background:var(--ink);padding:16px 18px calc(16px + env(safe-area-inset-bottom));
+    display:flex;align-items:center;justify-content:space-between;}
+  .shutter{width:70px;height:70px;border-radius:50%;background:#fff;border:4px solid var(--amber);
+    cursor:pointer;flex:0 0 auto;box-shadow:0 0 0 3px var(--ink) inset;}
+  .shutter:active{transform:scale(.94);}
+  .txt-btn{background:none;border:0;color:#cfc8bd;font-size:14px;cursor:pointer;padding:10px;min-width:64px;}
+  .txt-btn.right{text-align:right;}
+  .cam-fallback-note{color:#cfc8bd;font-size:12px;text-align:center;padding:10px 18px;background:var(--ink-2);}
+  .stage-overlay{position:absolute;inset:0;z-index:8;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;background:#0c0f12;color:#cfc8bd;
+    text-align:center;padding:0 30px;}
+  .stage-overlay p{margin:0;font-size:14px;line-height:1.6;}
+  .stage-overlay b{color:#fff;}
+  .spin{width:34px;height:34px;border-radius:50%;border:3px solid #33393f;border-top-color:var(--amber);
+    animation:spin 0.9s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* ====== 结果界面 ====== */
+  .result{padding:18px;flex:1;display:flex;flex-direction:column;}
+  .result h2{margin:0 0 4px;font-size:16px;}
+  .result .meta{font-size:12.5px;color:var(--muted);margin-bottom:14px;}
+  .result .meta b{color:var(--ok);}
+  .preview-box{background:#000;border-radius:16px;overflow:hidden;margin-bottom:8px;
+    display:flex;align-items:center;justify-content:center;min-height:200px;}
+  #resultImg{max-width:100%;max-height:52vh;display:block;}
+  .save-hint{font-size:12.5px;color:var(--muted);text-align:center;margin:8px 4px 16px;line-height:1.6;}
+  .save-hint b{color:var(--amber-d);}
+  .actions{margin-top:auto;display:flex;flex-direction:column;gap:10px;
+    padding-bottom:env(safe-area-inset-bottom);}
+  .btn{border:0;border-radius:14px;padding:16px;font-size:16px;font-weight:600;cursor:pointer;
+    text-align:center;text-decoration:none;display:block;}
+  .btn-primary{background:var(--ink);color:#fff;}
+  .btn-primary:active{background:var(--ink-2);}
+  .btn-ghost{background:transparent;color:var(--ink);border:1px solid var(--line);}
+  .row2{display:flex;gap:10px;}
+  .row2 .btn{flex:1;}
+
+  .center-msg{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:40px 30px;color:var(--muted);gap:12px;}
+  .center-msg .big{font-size:15px;color:var(--ink);font-weight:600;}
+  .hidden{display:none !important;}
+  .footer{text-align:center;font-size:11px;color:#a89e90;padding:16px 0 22px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#14181c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="7" width="18" height="12" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><circle cx="12" cy="13" r="2.2"/>
+      </svg>
+    </div>
+    <div>
+      <h1>证件拍照助手</h1>
+      <div class="sub" id="headerSub">拍清楚 · 自动压缩 · 存到手机</div>
+    </div>
+  </header>
+
+  <!-- 选择界面 -->
+  <section id="scr-pick" class="active">
+    <div class="intro">
+      <p>选择要拍的项目，按屏幕上的框对齐拍照，完成后保存到手机，再到<b style="color:var(--ink)">企业微信花名册</b>里上传。</p>
+    </div>
+    <div class="grid">
+      <button class="tile" data-type="id">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2.5" y="5" width="19" height="14" rx="2.2"/><circle cx="8" cy="12" r="2.4"/><path d="M13 10h6M13 13.5h4"/></svg></div>
+        <b>身份证</b><span>横向 · 正反面各拍一张</span>
+      </button>
+      <button class="tile" data-type="license">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2.5" y="5" width="19" height="14" rx="2.2"/><path d="M6 9h5M6 12h8M6 15h6"/><circle cx="17.5" cy="9.5" r="2"/></svg></div>
+        <b>驾驶证</b><span>横向 · 主页正副页</span>
+      </button>
+      <button class="tile" data-type="qual">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="2.5" width="14" height="19" rx="2"/><path d="M8 7h8M8 10.5h8M8 14h5"/></svg></div>
+        <b>从业资格证</b><span>竖向 · 内页信息</span>
+      </button>
+      <button class="tile" data-type="portrait">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6"/></svg></div>
+        <b>工作照</b><span>竖向 · 免冠正脸自拍</span>
+      </button>
+    </div>
+    <div class="tips">
+      <b>拍得规范的小窍门：</b><br>
+      · 把证件平放在<b>桌面或深色背景</b>上，光线均匀、不要反光<br>
+      · 让证件<b>填满取景框</b>，四个角都在框内、拍正拍平<br>
+      · 每张会自动压缩到 1MB 以内，企业微信可直接上传
+    </div>
+    <div class="footer">照片只保存在你自己的手机上，不会上传到任何服务器</div>
+  </section>
+
+  <!-- 相机界面 -->
+  <section id="scr-cam">
+    <div class="cam-stage">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="rawCanvas"></canvas>
+      <div class="guide" id="guide"><i></i><u></u></div>
+      <div class="hint-band" id="camHint">把证件放进黄框内，拍清楚四个角</div>
+      <div class="stage-overlay" id="camLoading"><div class="spin"></div><p>正在启动相机…</p></div>
+      <div class="stage-overlay hidden" id="camPlaceholder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#e8a317" stroke-width="1.6" width="52" height="52"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><circle cx="12" cy="13" r="2.4"/></svg>
+        <p><b>点下方圆形按钮</b>调起相机拍照</p>
+      </div>
+    </div>
+    <div class="cam-fallback-note hidden" id="fallbackNote">当前浏览器不支持实时取景，点下方按钮用系统相机拍摄</div>
+    <div class="cam-bar">
+      <button class="txt-btn" id="btnBack">返回</button>
+      <button class="shutter" id="btnShutter" aria-label="拍照"></button>
+      <button class="txt-btn right" id="btnSwitch">切换镜头</button>
+    </div>
+    <!-- 系统相机回退用的隐藏 input -->
+    <input type="file" id="fileInput" accept="image/*" capture="environment" class="hidden">
+  </section>
+
+  <!-- 结果界面 -->
+  <section id="scr-result">
+    <div class="result">
+      <h2 id="resTitle">拍摄完成</h2>
+      <div class="meta">文件已压缩：<b id="resSize">—</b> · <span id="resDim">—</span></div>
+      <div class="preview-box"><img id="resultImg" alt="拍摄结果"></div>
+      <div class="save-hint" id="saveHint"></div>
+      <div class="actions">
+        <a class="btn btn-primary" id="btnSave" download="证件.jpg">保存到手机</a>
+        <div class="row2">
+          <button class="btn btn-ghost" id="btnRetake">重拍</button>
+          <button class="btn btn-ghost" id="btnCropToggle">保存整张不裁剪</button>
+        </div>
+        <button class="btn btn-ghost" id="btnHome" style="border:0;color:var(--muted)">返回首页</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+
+/* ---------- 各证件的取景框比例（宽/高）与相机朝向 ---------- */
+const TYPES = {
+  id:       { name:"身份证",     ratio:1.585, orient:"land", facing:"environment", file:"身份证" },
+  license:  { name:"驾驶证",     ratio:1.55,  orient:"land", facing:"environment", file:"驾驶证" },
+  qual:     { name:"从业资格证", ratio:0.70,  orient:"port", facing:"environment", file:"从业资格证" },
+  portrait: { name:"工作照",     ratio:0.75,  orient:"port", facing:"user",        file:"工作照" },
+};
+
+const MAX_EDGE = 1600;          // 压缩后最长边像素
+const TARGET_BYTES = 900 * 1024; // 目标 <0.9MB
+
+const $ = s => document.querySelector(s);
+const iOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+let cur = null;          // 当前证件类型 key
+let stream = null;       // 摄像头流
+let facing = "environment";
+let lastRawCanvas = null;// 最近一次原始整帧（用于“不裁剪”切换）
+let cropOn = true;       // 是否按框裁剪
+let usingFallback = false;
+
+/* ---------- 界面切换 ---------- */
+function show(id){
+  document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
+  $('#'+id).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+/* ---------- 取景框尺寸 ---------- */
+function sizeGuide(){
+  const stage = $('.cam-stage').getBoundingClientRect();
+  const g = $('#guide');
+  const t = TYPES[cur];
+  let w,h;
+  if(t.orient === 'land'){
+    w = stage.width * 0.90;
+    h = w / t.ratio;
+    if(h > stage.height*0.72){ h = stage.height*0.72; w = h*t.ratio; }
+  }else{
+    h = stage.height * 0.74;
+    w = h * t.ratio;
+    if(w > stage.width*0.88){ w = stage.width*0.88; h = w/t.ratio; }
+  }
+  g.style.width = Math.round(w)+'px';
+  g.style.height = Math.round(h)+'px';
+}
+
+/* ---------- 启动实时摄像头 ---------- */
+let startTimer = null;
+async function startCamera(){
+  usingFallback = false;
+  stopCamera();
+  clearTimeout(startTimer);
+  $('#fallbackNote').classList.add('hidden');
+  $('#camPlaceholder').classList.add('hidden');
+  $('#video').classList.remove('hidden');
+  $('#guide').classList.remove('hidden');
+  $('#btnSwitch').style.visibility = 'visible';
+  $('#camLoading').classList.remove('hidden');   // 显示“正在启动相机…”
+
+  // 非安全环境（file:// 或 http，且非 localhost）浏览器会禁用摄像头 → 直接走系统相机
+  const secure = window.isSecureContext ||
+                 ['localhost','127.0.0.1'].includes(location.hostname);
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !secure){
+    enableFallback(!secure);
+    return;
+  }
+
+  // 启动超时兜底：3.5 秒内没出画面就回退
+  startTimer = setTimeout(()=>{ if(!usingFallback) enableFallback(false); }, 3500);
+
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ ideal:facing }, width:{ideal:2560}, height:{ideal:1440} },
+      audio:false
+    });
+    const v = $('#video');
+    v.srcObject = stream;
+    v.onloadedmetadata = ()=>{
+      clearTimeout(startTimer);
+      $('#camLoading').classList.add('hidden');
+      setTimeout(sizeGuide, 60);
+    };
+    await v.play().catch(()=>{});
+    window.addEventListener('resize', sizeGuide);
+  }catch(err){
+    clearTimeout(startTimer);
+    enableFallback(false);
+  }
+}
+function stopCamera(){
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+}
+
+/* ---------- 回退到系统相机 ---------- */
+function enableFallback(insecure){
+  usingFallback = true;
+  stopCamera();
+  clearTimeout(startTimer);
+  $('#camLoading').classList.add('hidden');
+  $('#video').classList.add('hidden');
+  $('#guide').classList.add('hidden');
+  $('#camPlaceholder').classList.remove('hidden');
+  $('#btnSwitch').style.visibility = (TYPES[cur].facing==='user') ? 'visible' : 'hidden';
+  $('#fallbackNote').textContent = insecure
+    ? '此环境不支持网页取景，点下方按钮用系统相机拍摄（拍照后同样会自动压缩）'
+    : '当前浏览器不支持实时取景，点下方按钮用系统相机拍摄';
+  $('#fallbackNote').classList.remove('hidden');
+  $('#fileInput').setAttribute('capture', facing === 'user' ? 'user' : 'environment');
+}
+
+/* ---------- 进入拍摄 ---------- */
+function openCamera(typeKey){
+  cur = typeKey;
+  const t = TYPES[typeKey];
+  facing = t.facing;
+  cropOn = true;
+  $('#camHint').textContent = t.orient==='land'
+     ? "把"+t.name+"放进黄框内，拍清楚四个角"
+     : (typeKey==='portrait' ? "人脸对准框内，正脸免冠、光线充足" : "把"+t.name+"放进黄框内，拍清楚");
+  $('#btnSwitch').style.visibility = (typeKey==='portrait') ? 'visible':'visible';
+  show('scr-cam');
+  startCamera();
+}
+
+/* ---------- 拍照（实时取景路径） ---------- */
+function captureFromVideo(){
+  const v = $('#video');
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if(!vw || !vh){ return; }
+
+  // 整帧原图（考虑前置镜头镜像）
+  const raw = document.createElement('canvas');
+  raw.width = vw; raw.height = vh;
+  const rctx = raw.getContext('2d');
+  if(facing === 'user'){ rctx.translate(vw,0); rctx.scale(-1,1); }
+  rctx.drawImage(v,0,0,vw,vh);
+  lastRawCanvas = raw;
+
+  render(); // 根据 cropOn 生成结果
+}
+
+/* ---------- 从原始帧生成（可切换裁剪/整张） ---------- */
+function render(){
+  if(!lastRawCanvas) return;
+  const raw = lastRawCanvas;
+  let sx=0, sy=0, sw=raw.width, sh=raw.height;
+
+  if(cropOn && !usingFallback){
+    // 把屏幕上的黄框映射回视频原始像素坐标（object-fit:cover 反算）
+    const stage = $('.cam-stage').getBoundingClientRect();
+    const gr = $('#guide').getBoundingClientRect();
+    const cw = stage.width, ch = stage.height;
+    const vw = raw.width, vh = raw.height;
+    const scale = Math.max(cw/vw, ch/vh);
+    const offX = (vw*scale - cw)/2;
+    const offY = (vh*scale - ch)/2;
+    sx = Math.max(0, (gr.left - stage.left + offX)/scale);
+    sy = Math.max(0, (gr.top  - stage.top  + offY)/scale);
+    sw = Math.min(vw - sx, gr.width/scale);
+    sh = Math.min(vh - sy, gr.height/scale);
+  }
+
+  finishTo(raw, sx, sy, sw, sh);
+}
+
+/* ---------- 缩放 + 压缩 + 显示 ---------- */
+function finishTo(src, sx, sy, sw, sh){
+  let ow = sw, oh = sh;
+  const longEdge = Math.max(ow, oh);
+  if(longEdge > MAX_EDGE){
+    const k = MAX_EDGE/longEdge; ow = Math.round(ow*k); oh = Math.round(oh*k);
+  }
+  const out = document.createElement('canvas');
+  out.width = Math.round(ow); out.height = Math.round(oh);
+  const octx = out.getContext('2d');
+  octx.fillStyle = '#fff'; octx.fillRect(0,0,out.width,out.height);
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(src, sx, sy, sw, sh, 0, 0, out.width, out.height);
+
+  compress(out).then(blob=>{
+    const url = URL.createObjectURL(blob);
+    const t = TYPES[cur];
+    const stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    const fname = t.file + '_' + stamp + '.jpg';
+    $('#resTitle').textContent = t.name + " · 拍摄完成";
+    $('#resSize').textContent = fmtSize(blob.size);
+    $('#resDim').textContent = out.width + "×" + out.height + " px";
+    $('#resultImg').src = url;
+    const a = $('#btnSave'); a.href = url; a.download = fname;
+    $('#btnCropToggle').textContent = cropOn ? "保存整张不裁剪" : "重新按框裁剪";
+    $('#btnCropToggle').classList.toggle('hidden', usingFallback); // 系统相机无框，隐藏切换
+    $('#saveHint').innerHTML = iOS
+      ? '苹果手机：<b>长按上方照片</b> → 选“存储图像”，即可存入相册'
+      : '点<b>保存到手机</b>，或长按照片选“保存图片”存入相册';
+    show('scr-result');
+  });
+}
+
+/* ---------- JPEG 质量递减压缩到目标体积 ---------- */
+function compress(canvas){
+  return new Promise(resolve=>{
+    let q = 0.92;
+    const step = ()=>{
+      canvas.toBlob(blob=>{
+        if(!blob){ resolve(canvas.toDataURL && dataURLtoBlob(canvas.toDataURL('image/jpeg',q))); return; }
+        if(blob.size <= TARGET_BYTES || q <= 0.5){ resolve(blob); }
+        else { q -= 0.08; step(); }
+      }, 'image/jpeg', q);
+    };
+    step();
+  });
+}
+function dataURLtoBlob(d){const b=atob(d.split(',')[1]),a=[];for(let i=0;i<b.length;i++)a.push(b.charCodeAt(i));return new Blob([new Uint8Array(a)],{type:'image/jpeg'});}
+function fmtSize(n){ return n<1024*1024 ? Math.round(n/1024)+' KB' : (n/1024/1024).toFixed(2)+' MB'; }
+
+/* ---------- 系统相机回退：处理选中的文件 ---------- */
+function handleFile(file){
+  if(!file) return;
+  const img = new Image();
+  img.onload = ()=>{
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    c.getContext('2d').drawImage(img,0,0); // 现代浏览器会自动按 EXIF 摆正
+    lastRawCanvas = c;
+    cropOn = false;              // 系统相机拍的整张，不做机器裁剪
+    finishTo(c, 0,0, c.width, c.height);
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+/* ---------- 事件绑定 ---------- */
+document.querySelectorAll('.tile').forEach(b=>{
+  b.addEventListener('click', ()=>openCamera(b.dataset.type));
+});
+$('#btnShutter').addEventListener('click', ()=>{
+  if(usingFallback){ $('#fileInput').click(); }
+  else { captureFromVideo(); }
+});
+$('#fileInput').addEventListener('change', e=> handleFile(e.target.files[0]));
+$('#btnSwitch').addEventListener('click', ()=>{
+  facing = (facing==='user') ? 'environment' : 'user';
+  if(usingFallback){ enableFallback(); $('#fileInput').click(); }
+  else startCamera();
+});
+$('#btnBack').addEventListener('click', ()=>{ stopCamera(); show('scr-pick'); });
+$('#btnRetake').addEventListener('click', ()=>{ cropOn = true; openCamera(cur); });
+$('#btnHome').addEventListener('click', ()=>{ stopCamera(); show('scr-pick'); });
+$('#btnCropToggle').addEventListener('click', ()=>{ cropOn = !cropOn; render(); });
+
+// 保存按钮：安卓可直接下载；iOS 引导长按（download 属性微信内常被忽略）
+$('#btnSave').addEventListener('click', (e)=>{
+  if(iOS){ e.preventDefault(); alert('请长按上方的照片，选择“存储图像”保存到相册'); }
+});
+
+window.addEventListener('pagehide', stopCamera);
+</script>
+</body>
+</html>
