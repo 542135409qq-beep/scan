@@ -188,8 +188,13 @@
       </div>
 
       <div class="ctrl" id="tuneBox">
+        <div class="lbl">墙面取样 <span>点照片上没换掉的墙面</span></div>
+        <div class="chips" style="margin-bottom:14px;">
+          <button class="chip" id="btnMask">预览选区</button>
+          <button class="chip" id="btnClearSample">清除取样</button>
+        </div>
         <div class="lbl">抠图容差 <span id="tolVal">中</span></div>
-        <input type="range" id="tol" min="25" max="130" value="62">
+        <input type="range" id="tol" min="20" max="170" value="62">
         <div class="lbl" style="margin-top:14px;">边缘柔化 <span id="fthVal">2</span></div>
         <input type="range" id="fth" min="0" max="6" value="2">
       </div>
@@ -203,7 +208,7 @@
         </div>
       </div>
 
-      <div class="warn" id="editWarn">背景是纯色墙面时效果最好。如果人物边缘被吃掉或背景没换干净，左右拖动<b>容差</b>调整。</div>
+      <div class="warn" id="editWarn"><b>墙面没换干净？</b>直接用手指点那块残留的墙面，可以连点好几处（墙上明暗不同的地方各点一下）。点<b>预览选区</b>能看到红色区域＝会被换掉的背景。人物被吃掉了就把<b>容差</b>往左拉。</div>
 
       <div class="actions">
         <button class="btn btn-primary" id="btnEditDone">完成，去保存</button>
@@ -257,7 +262,10 @@ let cur=null, stream=null, facing="environment";
 let lastRawCanvas=null, cropOn=true, usingFallback=false, startTimer=null;
 let editSrc=null;          // 裁好的证件照原图 canvas
 let bgChoice='none', sizeChoice='orig';
-let alphaCache=null, alphaTol=-1;   // 缓存 alpha 蒙版
+let alphaCache=null, alphaDirty=true;   // 缓存 alpha 蒙版
+let samples=[];            // 用户点选的背景取样点
+let showMask=false;        // 红色蒙版预览
+let lastTf=null;           // 预览画布 → 原图 的坐标映射
 
 function show(id){
   document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
@@ -371,7 +379,9 @@ function scaleTo(src,sx,sy,sw,sh){
 
 /* ============ 证件照换底 ============ */
 function openEditor(canvas){
-  editSrc=canvas; bgChoice='none'; sizeChoice='orig'; alphaCache=null; alphaTol=-1;
+  editSrc=canvas; bgChoice='none'; sizeChoice='orig';
+  alphaCache=null; alphaDirty=true; samples=[]; showMask=false;
+  $('#btnMask').textContent='预览选区'; $('#btnMask').classList.remove('on');
   document.querySelectorAll('.sw').forEach(b=>b.classList.toggle('on', b.dataset.bg==='none'));
   document.querySelectorAll('.chip').forEach(b=>b.classList.toggle('on', b.dataset.size==='orig'));
   $('#tuneBox').classList.add('hidden');
@@ -380,54 +390,75 @@ function openEditor(canvas){
   drawEdit();
 }
 
-/* 计算前景 alpha：从四周洪水填充出背景 */
-function buildAlpha(tol){
-  const w=editSrc.width, h=editSrc.height;
-  const d=editSrc.getContext('2d').getImageData(0,0,w,h).data;
-  const n=w*h;
-
-  // 取边框像素中位数作为背景色
+function wdist(r1,g1,b1,r2,g2,b2){
+  const dr=r1-r2, dg=g1-g2, db=b1-b2;
+  return Math.sqrt(dr*dr*0.9+dg*dg*1.2+db*db*0.9);
+}
+/* 在 (x,y) 处取 7x7 中位色，抗噪点 */
+function sampleAt(d,w,h,x,y){
   const rs=[],gs=[],bs=[];
-  const stepX=Math.max(1,Math.floor(w/60)), stepY=Math.max(1,Math.floor(h/60));
-  for(let x=0;x<w;x+=stepX){ let i=(x)*4; rs.push(d[i]);gs.push(d[i+1]);bs.push(d[i+2]); }
-  for(let y=0;y<h*0.5;y+=stepY){
-    let i=(y*w)*4; rs.push(d[i]);gs.push(d[i+1]);bs.push(d[i+2]);
-    let j=(y*w+w-1)*4; rs.push(d[j]);gs.push(d[j+1]);bs.push(d[j+2]);
+  for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){
+    const px=Math.min(w-1,Math.max(0,x+dx)), py=Math.min(h-1,Math.max(0,y+dy));
+    const i=(py*w+px)*4; rs.push(d[i]);gs.push(d[i+1]);bs.push(d[i+2]);
   }
   const med=a=>{a.sort((p,q)=>p-q);return a[a.length>>1];};
-  const br=med(rs), bg=med(gs), bb=med(bs);
+  return [med(rs),med(gs),med(bs)];
+}
+/* 没有手动取样时，自动在四角和上边缘多点取样（应对墙面明暗不均） */
+function autoSamples(d,w,h){
+  const pts=[[6,6],[w-7,6],[Math.round(w/2),5],[Math.round(w/4),5],[Math.round(w*3/4),5],
+             [5,Math.round(h/4)],[w-6,Math.round(h/4)],[5,Math.round(h/2)],[w-6,Math.round(h/2)],
+             [6,h-7],[w-7,h-7]];
+  return pts.map(p=>sampleAt(d,w,h,p[0],p[1]));
+}
 
-  const tolHi=tol, tolLo=tol*0.55;
+/* 多点取样 + 沿渐变扩散，计算前景 alpha（0=背景，1=人物） */
+function buildAlpha(tol){
+  const w=editSrc.width, h=editSrc.height, n=w*h;
+  const d=editSrc.getContext('2d').getImageData(0,0,w,h).data;
+  const S = samples.length ? samples.concat(autoSamples(d,w,h).slice(0,4)) : autoSamples(d,w,h);
+
+  // 每个像素到"最接近的背景取样色"的距离
   const dist=new Float32Array(n);
   for(let p=0,i=0;p<n;p++,i+=4){
-    const dr=d[i]-br, dg=d[i+1]-bg, db=d[i+2]-bb;
-    dist[p]=Math.sqrt(dr*dr*0.9+dg*dg*1.2+db*db*0.9);
+    let m=1e9;
+    for(let k=0;k<S.length;k++){
+      const v=wdist(d[i],d[i+1],d[i+2],S[k][0],S[k][1],S[k][2]);
+      if(v<m){ m=v; if(m<1) break; }
+    }
+    dist[p]=m;
   }
 
-  // 洪水填充
-  const reach=new Uint8Array(n);
-  const stack=new Int32Array(n);
+  const tolHi=tol, hardCap=tol*2.4, localTol=Math.max(11,tol*0.40);
+  const reach=new Uint8Array(n), stack=new Int32Array(n);
   let sp=0;
-  const push=p=>{ if(!reach[p] && dist[p]<tolHi){ reach[p]=1; stack[sp++]=p; } };
-  for(let x=0;x<w;x++){ push(x); push((h-1)*w+x); }
-  for(let y=0;y<h;y++){ push(y*w); push(y*w+w-1); }
+  const seed=p=>{ if(!reach[p] && dist[p]<tolHi){ reach[p]=1; stack[sp++]=p; } };
+  // 种子：四周边框 + 用户点过的位置
+  for(let x=0;x<w;x++){ seed(x); seed((h-1)*w+x); }
+  for(let y=0;y<h;y++){ seed(y*w); seed(y*w+w-1); }
+  for(let k=0;k<samples.length;k++){
+    const sp2=samples[k].pos;
+    if(sp2){ const p=sp2[1]*w+sp2[0]; if(!reach[p]){ reach[p]=1; stack[sp++]=p; } }
+  }
+  // 扩散：颜色够接近取样色 → 直接吃；否则若与邻居颜色变化平缓且未超上限 → 也吃（追踪墙面渐变）
+  const grow=(q,p)=>{
+    if(reach[q]) return;
+    if(dist[q]<tolHi){ reach[q]=1; stack[sp++]=q; return; }
+    if(dist[q]<hardCap){
+      const i=q*4, j=p*4;
+      if(wdist(d[i],d[i+1],d[i+2],d[j],d[j+1],d[j+2])<localTol){ reach[q]=1; stack[sp++]=q; }
+    }
+  };
   while(sp>0){
     const p=stack[--sp], x=p%w, y=(p-x)/w;
-    if(x>0)   push(p-1);
-    if(x<w-1) push(p+1);
-    if(y>0)   push(p-w);
-    if(y<h-1) push(p+w);
+    if(x>0)   grow(p-1,p);
+    if(x<w-1) grow(p+1,p);
+    if(y>0)   grow(p-w,p);
+    if(y<h-1) grow(p+w,p);
   }
 
-  // alpha：0=背景，1=人物
   const a=new Float32Array(n);
-  for(let p=0;p<n;p++){
-    if(!reach[p]){ a[p]=1; }
-    else{
-      const t=(dist[p]-tolLo)/(tolHi-tolLo);
-      a[p]= t<=0?0 : (t>=1?1:t);
-    }
-  }
+  for(let p=0;p<n;p++) a[p] = reach[p] ? 0 : 1;
   return {a,w,h};
 }
 
@@ -459,11 +490,23 @@ function composed(){
   const w=editSrc.width,h=editSrc.height;
   const c=document.createElement('canvas'); c.width=w; c.height=h;
   const x=c.getContext('2d');
-  if(bgChoice==='none'){ x.drawImage(editSrc,0,0); return cropSize(c); }
+  if(bgChoice==='none' && !showMask){ x.drawImage(editSrc,0,0); return cropSize(c); }
 
   const tol=+$('#tol').value, r=+$('#fth').value;
-  if(!alphaCache || alphaTol!==tol){ alphaCache=buildAlpha(tol); alphaTol=tol; }
+  if(alphaDirty || !alphaCache){ alphaCache=buildAlpha(tol); alphaDirty=false; }
   const a=blurAlpha(alphaCache.a,w,h,r);
+
+  if(showMask){   // 预览：被判定为背景的区域盖红色
+    const src0=editSrc.getContext('2d').getImageData(0,0,w,h), s0=src0.data;
+    for(let p=0,i=0;p<w*h;p++,i+=4){
+      const t=a[p];
+      s0[i]  = s0[i]  *t + 240*(1-t);
+      s0[i+1]= s0[i+1]*t +  60*(1-t);
+      s0[i+2]= s0[i+2]*t +  60*(1-t);
+    }
+    x.putImageData(src0,0,0);
+    return cropSize(c);
+  }
 
   const src=editSrc.getContext('2d').getImageData(0,0,w,h);
   const s=src.data;
@@ -479,12 +522,13 @@ function composed(){
 }
 
 function cropSize(c){
-  if(sizeChoice==='orig') return c;
+  if(sizeChoice==='orig'){ lastTf={sx:0,sy:0,sw:c.width,sh:c.height,tw:c.width,th:c.height}; return c; }
   const [tw,th]=SIZES[sizeChoice];
   const target=tw/th, cur=c.width/c.height;
   let sx=0,sy=0,sw=c.width,sh=c.height;
   if(cur>target){ sw=c.height*target; sx=(c.width-sw)/2; }
   else{ sh=c.width/target; sy=(c.height-sh)*0.35; }   // 偏上，留头顶少留下巴
+  lastTf={sx,sy,sw,sh,tw,th};
   const o=document.createElement('canvas'); o.width=tw; o.height=th;
   const x=o.getContext('2d'); x.imageSmoothingQuality='high';
   x.drawImage(c,sx,sy,sw,sh,0,0,tw,th);
@@ -492,15 +536,31 @@ function cropSize(c){
 }
 
 function drawEdit(){
-  const t0=performance.now();
   const c=composed();
   const view=$('#editCanvas');
   view.width=c.width; view.height=c.height;
-  view.getContext('2d').drawImage(c,0,0);
+  const x=view.getContext('2d');
+  x.drawImage(c,0,0);
+
+  // 画出取样点位置
+  if(samples.length && lastTf){
+    const kx=lastTf.tw/lastTf.sw, ky=lastTf.th/lastTf.sh;
+    x.lineWidth=Math.max(2,c.width/220);
+    samples.forEach(s=>{
+      if(!s.pos) return;
+      const cx=(s.pos[0]-lastTf.sx)*kx, cy=(s.pos[1]-lastTf.sy)*ky;
+      const r=Math.max(5,c.width/60);
+      x.beginPath(); x.arc(cx,cy,r,0,6.2832);
+      x.strokeStyle='#fff'; x.stroke();
+      x.beginPath(); x.arc(cx,cy,r*0.55,0,6.2832);
+      x.fillStyle='#e8a317'; x.fill();
+    });
+  }
+
   $('#editMeta').textContent = c.width+"×"+c.height+" px · "
-    + (bgChoice==='none' ? "未换背景" : "已换背景")
-    + (sizeChoice==='orig' ? "" : " · " + (sizeChoice==='one'?"一寸":"二寸"));
-  return performance.now()-t0;
+    + (showMask ? "选区预览（红=背景）" : (bgChoice==='none' ? "未换背景" : "已换背景"))
+    + (sizeChoice==='orig' ? "" : " · " + (sizeChoice==='one'?"一寸":"二寸"))
+    + (samples.length ? " · 取样 "+samples.length+" 点" : "");
 }
 
 /* ============ 导出 ============ */
@@ -579,12 +639,38 @@ document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>{
 let tmr=null;
 $('#tol').addEventListener('input',()=>{
   const v=+$('#tol').value;
-  $('#tolVal').textContent = v<50?'小':(v<85?'中':'大');
+  $('#tolVal').textContent = v<55?'小':(v<105?'中':'大');
+  alphaDirty=true;
   clearTimeout(tmr); tmr=setTimeout(drawEdit,140);
 });
 $('#fth').addEventListener('input',()=>{
   $('#fthVal').textContent=$('#fth').value;
-  clearTimeout(tmr); tmr=setTimeout(drawEdit,140);
+  clearTimeout(tmr); tmr=setTimeout(drawEdit,140);   // 羽化不用重算蒙版
+});
+
+/* 点击预览图 → 把该处颜色加入背景取样 */
+$('#editCanvas').addEventListener('click',ev=>{
+  if(!editSrc || !lastTf || bgChoice==='none' && !showMask) return;
+  const cv=$('#editCanvas'), rect=cv.getBoundingClientRect();
+  const cx=(ev.clientX-rect.left)*(cv.width/rect.width);
+  const cy=(ev.clientY-rect.top )*(cv.height/rect.height);
+  const sx=Math.round(lastTf.sx + cx*lastTf.sw/lastTf.tw);
+  const sy=Math.round(lastTf.sy + cy*lastTf.sh/lastTf.th);
+  const w=editSrc.width,h=editSrc.height;
+  if(sx<0||sy<0||sx>=w||sy>=h) return;
+  const d=editSrc.getContext('2d').getImageData(0,0,w,h).data;
+  const col=sampleAt(d,w,h,sx,sy);
+  col.pos=[sx,sy];
+  samples.push(col);
+  if(samples.length>12) samples.shift();
+  alphaDirty=true; drawEdit();
+});
+$('#btnClearSample').addEventListener('click',()=>{ samples=[]; alphaDirty=true; drawEdit(); });
+$('#btnMask').addEventListener('click',()=>{
+  showMask=!showMask;
+  $('#btnMask').classList.toggle('on',showMask);
+  $('#btnMask').textContent = showMask?'关闭预览':'预览选区';
+  drawEdit();
 });
 $('#btnEditDone').addEventListener('click',()=>exportCanvas(composed()));
 $('#btnEditRetake').addEventListener('click',()=>{ cropOn=true; openCamera('portrait'); });
