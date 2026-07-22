@@ -102,6 +102,7 @@
   .chip{flex:1;padding:11px 6px;border-radius:10px;border:1px solid var(--line);background:#fff;
     font-size:13px;cursor:pointer;color:var(--ink);}
   .chip.on{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .chip:disabled{opacity:.4;cursor:not-allowed;}
   input[type=range]{width:100%;accent-color:var(--amber-d);}
   .hidden{display:none !important;}
   .footer{text-align:center;font-size:11px;color:#a89e90;padding:16px 0 22px;}
@@ -143,7 +144,8 @@
       <b>拍得规范的小窍门：</b><br>
       · 证件平放在<b>桌面或深色背景</b>上，光线均匀、不要反光<br>
       · 让证件<b>填满取景框</b>，四个角都在框内、拍正拍平<br>
-      · 拍证件照请<b>面对干净白墙</b>站立，人离墙半米以上，这样换底效果最好<br>
+      · 工作照支持<b>智能识别换底</b>（红/蓝/白底），墙面不必纯色也能换<br>
+      · 首次换底会下载一次识别引擎（约 6MB），<b>建议连 WiFi</b>，之后同一部手机不用再下载<br>
       · 每张会自动压缩，企业微信可直接上传
     </div>
     <div class="footer">照片只保存在你自己的手机上，不会上传到任何服务器</div>
@@ -187,7 +189,22 @@
         </div>
       </div>
 
-      <div class="ctrl" id="tuneBox">
+      <div class="ctrl hidden" id="aiStatusBox">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="spin" style="width:18px;height:18px;border-width:2px;flex:0 0 auto;"></div>
+          <div style="font-size:12.5px;color:var(--muted);line-height:1.5;" id="aiStatusText">正在识别人像…</div>
+        </div>
+      </div>
+
+      <div class="ctrl hidden" id="modeBox">
+        <div class="lbl">抠图方式</div>
+        <div class="chips">
+          <button class="chip on" id="modeAi" data-mode="ai">智能识别（推荐）</button>
+          <button class="chip" id="modeManual" data-mode="manual">手动圈定</button>
+        </div>
+      </div>
+
+      <div class="ctrl hidden" id="tuneBox">
         <div class="lbl">墙面取样 <span>点照片上没换掉的墙面</span></div>
         <div class="chips" style="margin-bottom:14px;">
           <button class="chip" id="btnMask">预览选区</button>
@@ -195,7 +212,10 @@
         </div>
         <div class="lbl">抠图容差 <span id="tolVal">中</span></div>
         <input type="range" id="tol" min="20" max="170" value="62">
-        <div class="lbl" style="margin-top:14px;">边缘柔化 <span id="fthVal">2</span></div>
+      </div>
+
+      <div class="ctrl hidden" id="fthBox">
+        <div class="lbl">边缘柔化 <span id="fthVal">2</span></div>
         <input type="range" id="fth" min="0" max="6" value="2">
       </div>
 
@@ -208,7 +228,7 @@
         </div>
       </div>
 
-      <div class="warn" id="editWarn"><b>墙面没换干净？</b>直接用手指点那块残留的墙面，可以连点好几处（墙上明暗不同的地方各点一下）。点<b>预览选区</b>能看到红色区域＝会被换掉的背景。人物被吃掉了就把<b>容差</b>往左拉。</div>
+      <div class="warn hidden" id="editWarn"><b>墙面没换干净？</b>直接用手指点那块残留的墙面，可以连点好几处（墙上明暗不同的地方各点一下）。点<b>预览选区</b>能看到红色区域＝会被换掉的背景。人物被吃掉了就把<b>容差</b>往左拉。</div>
 
       <div class="actions">
         <button class="btn btn-primary" id="btnEditDone">完成，去保存</button>
@@ -240,6 +260,7 @@
   </section>
 </div>
 
+<script src="assets/selfie_segmentation.js"></script>
 <script>
 "use strict";
 
@@ -262,10 +283,12 @@ let cur=null, stream=null, facing="environment";
 let lastRawCanvas=null, cropOn=true, usingFallback=false, startTimer=null;
 let editSrc=null;          // 裁好的证件照原图 canvas
 let bgChoice='none', sizeChoice='orig';
-let alphaCache=null, alphaDirty=true;   // 缓存 alpha 蒙版
+let alphaCache=null, alphaDirty=true;   // 手动模式蒙版缓存
 let samples=[];            // 用户点选的背景取样点
 let showMask=false;        // 红色蒙版预览
 let lastTf=null;           // 预览画布 → 原图 的坐标映射
+let manualMode=false;      // false=AI智能识别, true=手动圈定
+let aiSeg=null, aiInitPromise=null, aiAlpha=null, aiAlphaForSrc=null, aiFailed=false, aiBusy=false;
 
 function show(id){
   document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
@@ -381,12 +404,75 @@ function scaleTo(src,sx,sy,sw,sh){
 function openEditor(canvas){
   editSrc=canvas; bgChoice='none'; sizeChoice='orig';
   alphaCache=null; alphaDirty=true; samples=[]; showMask=false;
+  aiAlpha=null; aiAlphaForSrc=null; aiBusy=false;
+  manualMode = aiFailed;   // 之前 AI 加载失败过，本次直接用手动
   $('#btnMask').textContent='预览选区'; $('#btnMask').classList.remove('on');
   document.querySelectorAll('.sw').forEach(b=>b.classList.toggle('on', b.dataset.bg==='none'));
-  document.querySelectorAll('.chip').forEach(b=>b.classList.toggle('on', b.dataset.size==='orig'));
-  $('#tuneBox').classList.add('hidden');
-  $('#editWarn').classList.add('hidden');
+  document.querySelectorAll('.chip[data-size]').forEach(b=>b.classList.toggle('on', b.dataset.size==='orig'));
+  $('#modeAi').classList.toggle('on', !manualMode);
+  $('#modeManual').classList.toggle('on', manualMode);
+  $('#modeAi').disabled = aiFailed;
+  $('#modeBox').classList.add('hidden');
+  $('#tuneBox').classList.toggle('hidden', !manualMode);
+  $('#fthBox').classList.add('hidden');
+  $('#aiStatusBox').classList.add('hidden');
+  $('#editWarn').classList.toggle('hidden', !manualMode);
   show('scr-edit');
+  drawEdit();
+}
+
+/* 首次调用会触发引擎文件下载（约6MB，同一部手机之后会有缓存） */
+function ensureAiSeg(){
+  if(!aiInitPromise){
+    aiInitPromise=(async()=>{
+      if(typeof SelfieSegmentation==='undefined') throw new Error('lib not loaded');
+      const seg=new SelfieSegmentation({locateFile:f=>'assets/'+f});
+      seg.setOptions({modelSelection:0});
+      await seg.initialize();
+      aiSeg=seg;
+      return seg;
+    })().catch(err=>{ aiFailed=true; throw err; });
+  }
+  return aiInitPromise;
+}
+
+/* 对当前 editSrc 跑一次智能人像识别，结果缓存到 aiAlpha */
+async function runAI(){
+  if(manualMode || aiFailed) return;
+  if(aiAlphaForSrc===editSrc) return;  // 已经算过
+  aiBusy=true;
+  $('#aiStatusBox').classList.remove('hidden');
+  $('#aiStatusText').textContent = aiInitPromise
+    ? '正在识别人像…'
+    : '首次使用需下载智能抠图引擎（约6MB，建议连WiFi）…';
+  try{
+    const seg=await ensureAiSeg();
+    const mask=await new Promise((resolve,reject)=>{
+      seg.onResults(r=>resolve(r.segmentationMask));
+      seg.send({image:editSrc}).catch(reject);
+    });
+    const w=editSrc.width,h=editSrc.height;
+    const mc=document.createElement('canvas'); mc.width=w; mc.height=h;
+    const mctx=mc.getContext('2d');
+    mctx.drawImage(mask,0,0,w,h);
+    const id=mctx.getImageData(0,0,w,h).data;
+    const a=new Float32Array(w*h);
+    for(let p=0,i=0;p<a.length;p++,i+=4) a[p]=id[i]/255;
+    aiAlpha=a; aiAlphaForSrc=editSrc;
+  }catch(err){
+    console.error('AI 识别失败',err);
+    aiFailed=true; manualMode=true;
+    $('#modeAi').disabled=true;
+    $('#modeAi').classList.remove('on'); $('#modeManual').classList.add('on');
+    $('#tuneBox').classList.remove('hidden');
+    $('#editWarn').classList.remove('hidden');
+    $('#aiStatusText').textContent='智能识别不可用（可能是网络问题），已切换到手动模式';
+    setTimeout(()=>$('#aiStatusBox').classList.add('hidden'),2200);
+    aiBusy=false; drawEdit();
+    return;
+  }
+  aiBusy=false;
+  $('#aiStatusBox').classList.add('hidden');
   drawEdit();
 }
 
@@ -490,11 +576,19 @@ function composed(){
   const w=editSrc.width,h=editSrc.height;
   const c=document.createElement('canvas'); c.width=w; c.height=h;
   const x=c.getContext('2d');
-  if(bgChoice==='none' && !showMask){ x.drawImage(editSrc,0,0); return cropSize(c); }
+  if((bgChoice==='none' && !showMask) || (!manualMode && (aiBusy || aiAlphaForSrc!==editSrc))){
+    x.drawImage(editSrc,0,0); return cropSize(c);
+  }
 
-  const tol=+$('#tol').value, r=+$('#fth').value;
-  if(alphaDirty || !alphaCache){ alphaCache=buildAlpha(tol); alphaDirty=false; }
-  const a=blurAlpha(alphaCache.a,w,h,r);
+  const r=+$('#fth').value;
+  let a;
+  if(manualMode){
+    const tol=+$('#tol').value;
+    if(alphaDirty || !alphaCache){ alphaCache=buildAlpha(tol); alphaDirty=false; }
+    a=blurAlpha(alphaCache.a,w,h,r);
+  }else{
+    a=blurAlpha(aiAlpha,w,h,r);
+  }
 
   if(showMask){   // 预览：被判定为背景的区域盖红色
     const src0=editSrc.getContext('2d').getImageData(0,0,w,h), s0=src0.data;
@@ -542,8 +636,8 @@ function drawEdit(){
   const x=view.getContext('2d');
   x.drawImage(c,0,0);
 
-  // 画出取样点位置
-  if(samples.length && lastTf){
+  // 画出取样点位置（仅手动模式）
+  if(manualMode && samples.length && lastTf){
     const kx=lastTf.tw/lastTf.sw, ky=lastTf.th/lastTf.sh;
     x.lineWidth=Math.max(2,c.width/220);
     samples.forEach(s=>{
@@ -558,9 +652,9 @@ function drawEdit(){
   }
 
   $('#editMeta').textContent = c.width+"×"+c.height+" px · "
-    + (showMask ? "选区预览（红=背景）" : (bgChoice==='none' ? "未换背景" : "已换背景"))
+    + (showMask ? "选区预览（红=背景）" : (bgChoice==='none' ? "未换背景" : (manualMode?"已换背景 · 手动":"已换背景 · 智能识别")))
     + (sizeChoice==='orig' ? "" : " · " + (sizeChoice==='one'?"一寸":"二寸"))
-    + (samples.length ? " · 取样 "+samples.length+" 点" : "");
+    + (manualMode && samples.length ? " · 取样 "+samples.length+" 点" : "");
 }
 
 /* ============ 导出 ============ */
@@ -628,13 +722,24 @@ document.querySelectorAll('.sw').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('.sw').forEach(o=>o.classList.remove('on'));
   b.classList.add('on'); bgChoice=b.dataset.bg;
   const on = bgChoice!=='none';
-  $('#tuneBox').classList.toggle('hidden',!on);
-  $('#editWarn').classList.toggle('hidden',!on);
-  drawEdit();
+  $('#modeBox').classList.toggle('hidden', !on);
+  $('#fthBox').classList.toggle('hidden', !on);
+  $('#tuneBox').classList.toggle('hidden', !(on && manualMode));
+  $('#editWarn').classList.toggle('hidden', !(on && manualMode));
+  if(on && !manualMode){ runAI(); } else { drawEdit(); }
 }));
-document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('.chip').forEach(o=>o.classList.remove('on'));
+document.querySelectorAll('.chip[data-size]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.chip[data-size]').forEach(o=>o.classList.remove('on'));
   b.classList.add('on'); sizeChoice=b.dataset.size; drawEdit();
+}));
+document.querySelectorAll('.chip[data-mode]').forEach(b=>b.addEventListener('click',()=>{
+  if(b.disabled) return;
+  manualMode = (b.dataset.mode==='manual');
+  document.querySelectorAll('.chip[data-mode]').forEach(o=>o.classList.remove('on'));
+  b.classList.add('on');
+  $('#tuneBox').classList.toggle('hidden', !manualMode);
+  $('#editWarn').classList.toggle('hidden', !manualMode);
+  if(!manualMode){ runAI(); } else { drawEdit(); }
 }));
 let tmr=null;
 $('#tol').addEventListener('input',()=>{
@@ -650,7 +755,7 @@ $('#fth').addEventListener('input',()=>{
 
 /* 点击预览图 → 把该处颜色加入背景取样 */
 $('#editCanvas').addEventListener('click',ev=>{
-  if(!editSrc || !lastTf || bgChoice==='none' && !showMask) return;
+  if(!manualMode || !editSrc || !lastTf || (bgChoice==='none' && !showMask)) return;
   const cv=$('#editCanvas'), rect=cv.getBoundingClientRect();
   const cx=(ev.clientX-rect.left)*(cv.width/rect.width);
   const cy=(ev.clientY-rect.top )*(cv.height/rect.height);
